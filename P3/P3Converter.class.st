@@ -14,7 +14,8 @@ Class {
 		'map',
 		'stringWriteStream',
 		'asciiReadStream',
-		'asciiWriteStream'
+		'asciiWriteStream',
+		'timestampClass'
 	],
 	#category : #'P3-Support'
 }
@@ -156,7 +157,9 @@ P3Converter >> convertCircleFrom: bytes length: length description: description 
 P3Converter >> convertDateAndTimeFrom: bytes length: length description: description [
 	"TIMESTAMP WITH TIME ZONE (TIMESTAMPTZ) is stored internally in Postgres as UTC, but represented in the timezone of the connection, with a correct offset added. In other words, Postgres does the necessary shifting, we just have to read the result. For this to work, the connection output format must be ISO, the default."
 	
-	^ (P3ISO8601Parser on: (self asciiStreamFor: bytes length: length)) parseDateAndTime
+	^ (P3ISO8601Parser on: (self asciiStreamFor: bytes length: length))
+			timestampClass: timestampClass;
+			parseDateAndTime
 ]
 
 { #category : #'converting-chronology' }
@@ -164,7 +167,9 @@ P3Converter >> convertDateAndTimeWithoutTimezoneFrom: bytes length: length descr
 	"TIMESTAMP WITHOUT TIME ZONE (TIMESTAMP) is stored internally in Postgres the way it was inserted, its representation remains constant, with no offset added. We use the timezone of the connection to do the necessary shifting. This assumes that the timezones used during insert/update and query are the same. For this to work, the connection output format must be ISO, the default."
 
 	| timestamp offset |
-	timestamp := (P3ISO8601Parser on: (self asciiStreamFor: bytes length: length)) parseDateAndTime.
+	timestamp := (P3ISO8601Parser on: (self asciiStreamFor: bytes length: length))
+							timestampClass: timestampClass;
+							parseDateAndTime.
 	offset := self timezone offsetForTimestamp: timestamp.
 	^ offset isZero
 		ifTrue: [ timestamp ]
@@ -301,7 +306,7 @@ P3Converter >> convertTimeFrom: bytes length: length description: description [
 P3Converter >> convertTimeWithTimezoneFrom: bytes length: length description: description [
 	"TIME WITH TIME ZONE corresponds to Time plus an offset. 
 	Time does not hold a time zone nor an offset.
-	We comnpare the offset coming in with the offset for that time today 
+	We compare the offset coming in with the offset for that time today 
 	in our connection's timezone, if they differ we correct to compensate.
 	For this to work, the connection output format must be ISO, the default"
 
@@ -355,6 +360,7 @@ P3Converter >> initialize [
 	asciiReadStream := String new readStream.
 	asciiWriteStream := String new writeStream.
 	stringWriteStream := String new writeStream.
+	timestampClass := DateAndTime.
 	self initializeTypeMap
 ]
 
@@ -392,6 +398,16 @@ P3Converter >> printOn: stream [
 	stream space.
 	self timezone ifNotNil: [ :tmz | stream print: tmz id ].
 	stream nextPut: $)
+]
+
+{ #category : #accessing }
+P3Converter >> timestampClass [
+	^ timestampClass
+]
+
+{ #category : #accessing }
+P3Converter >> timestampClass: anObject [
+	timestampClass := anObject
 ]
 
 { #category : #accessing }
