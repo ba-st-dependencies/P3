@@ -321,6 +321,34 @@ P3ClientTest >> testIntegerConversion [
 ]
 
 { #category : #tests }
+P3ClientTest >> testIntegerVector [
+
+	| result statement |
+	client execute: 'DROP TABLE IF EXISTS table1'.
+	client execute: 'CREATE TABLE table1 (id INTEGER, v oidvector)'.
+	client execute:
+		'INSERT INTO table1 (id, v) VALUES (1, ''0 1 2 3 4 5 67890 1234567'')'.
+	result := client query: 'SELECT id, v FROM table1 WHERE id = 1'.
+	self
+		assert: result firstRecord
+		equals: #( 1 #( 0 1 2 3 4 5 67890 1234567 ) ).
+
+
+	"statement := client prepare:
+		             'INSERT INTO table1 (id, v) VALUES ($1, $2)'.
+	statement execute: { 
+			1.
+			#( 77 1974 1945 ) }.
+			
+	result := client query: 'SELECT id, v FROM table1 WHERE id = 2'.
+	self assert: result firstRecord equals: { 
+			2.
+			#( 77 1974 1945 ) }."
+
+	client execute: 'DROP TABLE table1'
+]
+
+{ #category : #tests }
 P3ClientTest >> testIntervalConversion [
 	| result |
 	result := client query: 'SELECT INTERVAL ''1 years 1 mons 1 days 1 hours 1 minutes 1 seconds'''.
@@ -712,6 +740,48 @@ P3ClientTest >> testUuid [
 	self assert: result firstRecord equals: { uuid. num }.
 	
 	client execute: 'DROP TABLE testUUID'
+]
+
+{ #category : #tests }
+P3ClientTest >> testValuesArray1 [
+	| statement result |
+	client execute: 'DROP TABLE IF EXISTS table_a'.
+	client execute: 'CREATE TABLE table_a (id INTEGER, name TEXT, text_a TEXT[], int_a INTEGER[])'.
+	statement := client format: 'INSERT INTO table_a (id, name, text_a, int_a) VALUES ($1, $2, $3, $4)'.
+	statement execute: { 1. 'foo'. P3ValuesArray withAll: #('foo' 'bar'). P3ValuesArray withAll: #(1 2) }.
+	statement execute: { 2. 'null'. P3ValuesArray withAll: #('NULL' nil). P3ValuesArray withAll: #(0 nil) }.
+	statement execute: { 3. 'zero'. P3ValuesArray empty. P3ValuesArray empty }.
+	statement execute: { 4. 'escape'. P3ValuesArray withAll: #('a"b' 'c\d'). P3ValuesArray withAll: #(1 2) }.
+	result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 1'.
+	self assert: result firstRecord equals: #(1 'foo' #('foo' 'bar') #(1 2)).
+	result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 2'.
+	self assert: result firstRecord equals: #(2 'null' #('NULL' nil) #(0 nil)).
+	result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 3'.
+	self assert: result firstRecord equals: #(3 'zero' #() #()).
+	result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 4'.
+	self assert: result firstRecord equals: #(4 'escape' #('a"b' 'c\d') #(1 2)).
+	client execute: 'DROP TABLE table_a'
+]
+
+{ #category : #tests }
+P3ClientTest >> testValuesArray2 [
+	| statement result |
+	client execute: 'DROP TABLE IF EXISTS table_a'.
+	client execute: 'CREATE TABLE table_a (id INTEGER, name TEXT, text_a TEXT[], int_a INTEGER[])'.
+	statement := client prepare: 'INSERT INTO table_a (id, name, text_a, int_a) VALUES ($1, $2, $3, $4)'.
+	statement execute: { 1. 'foo'. P3ValuesArray withAll: #('foo' 'bar'). P3ValuesArray withAll: #(1 2) }.
+	"statement execute: { 2. 'null'. P3ValuesArray withAll: #('NULL' nil). P3ValuesArray withAll: #(0 nil) }."
+	statement execute: { 3. 'zero'. P3ValuesArray empty. P3ValuesArray empty }.
+	"statement execute: { 4. 'escape'. P3ValuesArray withAll: #('a""b' 'c\d'). P3ValuesArray withAll: #(1 2) }."
+	result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 1'.
+	self assert: result firstRecord equals: #(1 'foo' #('foo' 'bar') #(1 2)).
+	"result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 2'.
+	self assert: result firstRecord equals: #(2 'null' #('NULL' nil) #(0 nil))."
+	result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 3'.
+	self assert: result firstRecord equals: #(3 'zero' #() #()).
+	"result := client query: 'SELECT id, name, text_a, int_a FROM table_a WHERE id = 4'.
+	self assert: result firstRecord equals: #(4 'escape' #('a""b' 'c\d') #(1 2))."
+	client execute: 'DROP TABLE table_a'
 ]
 
 { #category : #tests }
