@@ -81,7 +81,8 @@ Class {
 		'settings',
 		'properties',
 		'converter',
-		'message'
+		'message',
+		'access'
 	],
 	#category : #'P3-Core'
 }
@@ -114,6 +115,13 @@ P3Client >> authenticationTypes [
 		10 -> #SASL } asDictionary
 ]
 
+{ #category : #'initialize-release' }
+P3Client >> beThreadSafe [
+	"Configure me so that I can be safely used from multiple threads/processes during important operations"
+	
+	access := Monitor new
+]
+
 { #category : #private }
 P3Client >> clearSSL [
 	settings removeKey: #ssl ifAbsent: [ ]
@@ -134,26 +142,35 @@ P3Client >> clearTextPasswordMessage [
 P3Client >> close [
 	"Cleanly close my connection with the server"
 
-	connection
-		ifNotNil: [ 
-			[ 
-				self logDisconnecting.
-				self writeMessage: #[] tag: $X. 
-				connection close ] on: Error do: [  ].
-				self clearSession.
-			connection := nil ]
+	connection ifNotNil: [ 
+		[ 
+			self writeMessage: #[] tag: $X.
+			connection close ] on: Error do: [  ].
+		self clearSession.
+		connection := nil.
+		self logDisconnected ]
+]
+
+{ #category : #accessing }
+P3Client >> compactUrl [
+	^ self url
+		scheme: #psql;
+		password: nil;
+		queryRemoveAll;
+		yourself
 ]
 
 { #category : #public }
 P3Client >> connect [
 	"Connect me to a PostgreSQL database. 
 	Run the authentication and startup protocols. Configure the session."
-	
-	self 
-		ensureOpen;
-		connectInternal;
-	 	clearSSL;
-		logConnected
+
+	self critical: [ 
+		self
+			ensureOpen;
+			connectInternal;
+			clearSSL;
+			logConnected ]
 ]
 
 { #category : #protocol }
@@ -172,14 +189,14 @@ P3Client >> connectInternal [
 P3Client >> connectSSL [
 	"Connect me to a PostgreSQL database over an encrypted SSL connection. 
 	Run the authentication and startup protocols. Configure the session."
-	
-	self 
-		ensureOpen;
-	 	upgradeToSSL;
-		connectInternal;
-	 	setSSL;
-		logConnected 
 
+	self critical: [
+		self
+			ensureOpen;
+			upgradeToSSL;
+			connectInternal;
+			setSSL;
+			logConnected ]
 ]
 
 { #category : #accessing }
@@ -214,6 +231,13 @@ P3Client >> createPreparedStatementNamed: name withParameters: parameterDescript
 	(properties at: 'prepared_statements' ifAbsentPut: [ Dictionary new ])
 		at: name put: preparedStatement.
 	^ preparedStatement
+]
+
+{ #category : #private }
+P3Client >> critical: block [
+	^ access
+		ifNil: block
+		ifNotNil: [ access critical: block ]
 ]
 
 { #category : #accessing }
@@ -374,6 +398,8 @@ P3Client >> initialize [
 	
 	settings := IdentityDictionary new.
 	properties := Dictionary new.
+	
+	self beThreadSafe
 ]
 
 { #category : #private }
@@ -413,6 +439,13 @@ P3Client >> isServerVersionAtLeastMajor: major minor: minor [
 ]
 
 { #category : #testing }
+P3Client >> isUsingUnixSocket [
+	"Following the PostgreSQL convention a host starting with a / is a path to a Unix Socket"
+	
+	^ self host notNil and: [ self host first = $/ ]
+]
+
+{ #category : #testing }
 P3Client >> isWorking [
 	"Do a trivial query to confirm that I can interact with the server.
 	Return true if successful"
@@ -425,7 +458,8 @@ P3Client >> isWorking [
 
 { #category : #convenience }
 P3Client >> listDatabases [
-	"Return the list of known database names"
+	"Return the list of known database names.
+	I can only be connected to a single database, see #database"
 	
 	^ (self query: 'SELECT datname FROM pg_database ORDER BY 1') firstColumnData
 ]
@@ -442,17 +476,16 @@ P3Client >> listEnums [
 P3Client >> listSchemas [
 	"Return the list of known schema or namespace names"
 	
-	^ (self query: 'SELECT nspname FROM pg_namespace ORDER BY 1') firstColumnData
+	^ (self query: 'SELECT schema_name FROM information_schema.schemata ORDER BY 1') firstColumnData
 ]
 
 { #category : #convenience }
 P3Client >> listTablesInSchema: schemaName [
-	"Return the list of known table names in a given schema"
+	"Return the list of known table names in a given schema as table name, table type pairs."
 	
-	| query |
-	query := 'SELECT tablename FROM pg_tables WHERE schemaname=''{1}'' ORDER BY 1' 
-		format: { schemaName }.
-	^ (self query: query) firstColumnData
+	| statement |
+	statement := self format: 'SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1 ORDER BY 1'.
+	^ (statement query: { schemaName } ) data
 ]
 
 { #category : #configuration }
@@ -489,7 +522,7 @@ P3Client >> logConnected [
 ]
 
 { #category : #'private - logging' }
-P3Client >> logDisconnecting [
+P3Client >> logDisconnected [
 	(self newLogEvent: P3ConnectionClosedEvent)
 		emit 
 ]
@@ -528,7 +561,7 @@ P3Client >> logResult: result [
 		result: result;
 		duration: duration;
 		emit.
-	properties removeKey: #query_started
+	properties removeKey: #query_started ifAbsent: [  ]
 ]
 
 { #category : #'private - logging' }
@@ -568,10 +601,14 @@ P3Client >> open [
 	"Open my connection with the server (do not yet #connect)"
 	
 	self close.
-	connection := ZdcSocketStream openConnectionToHostNamed: self host port: self port.
+	connection := self isUsingUnixSocket
+		ifTrue: [ | unixSocket |
+			unixSocket := ZnNetworkingUtils default unixSocketOnFile: self host asFileReference.
+			ZdcSocketStream on: unixSocket]
+		ifFalse: [ 
+			ZdcSocketStream openConnectionToHostNamed: self host port: self port ].
 	connection timeout: self timeout.
 	message := P3MessageBuffer new
-
 ]
 
 { #category : #accessing }
@@ -635,41 +672,42 @@ P3Client >> prepare: query named: queryName [
 
 	| parameterDescriptions rowDescriptions statement |
 
-	self 
-		ensureConnected;
-		writeParseMessage: query name: queryName types: #();
-		writeDescribeMessage: queryName type: $S;
-		writeSyncMessage.
+	self critical: [
+		self 
+			ensureConnected;
+			writeParseMessage: query name: queryName types: #();
+			writeDescribeMessage: queryName type: $S;
+			writeSyncMessage.
 
-	self readMessage tag = $1
-		ifFalse: [ ^ P3Error parseCompleteExpected signal ].
+		self readMessage tag = $1
+			ifFalse: [ ^ P3Error parseCompleteExpected signal ].
 
-	self readMessage.
-	message tag = $t
-		ifTrue: [ parameterDescriptions := self processParameterDescription: message readStream ]
-		ifFalse: [ 
-			parameterDescriptions := #().
-			message tag = $n 
-				ifFalse: [ P3Error noDataExpected signal ] ].
+		self readMessage tag = $t
+			ifTrue: [ parameterDescriptions := self processParameterDescription: message readStream ]
+			ifFalse: [ 
+				parameterDescriptions := #().
+				message tag = $n 
+					ifFalse: [ P3Error noDataExpected signal ] ].
 
-	self readMessage.
-	message tag = $T
-		ifTrue: [ rowDescriptions := self processRowDescription: message readStream ]
-		ifFalse: [ 
-			rowDescriptions := #().
-			message tag = $n
-				ifFalse: [ P3Error noDataExpected signal ] ].
+		self readMessage tag = $T
+			ifTrue: [ rowDescriptions := self processRowDescription: message readStream ]
+			ifFalse: [ 
+				rowDescriptions := #().
+				message tag = $n
+					ifFalse: [ P3Error noDataExpected signal ] ].
 
-	self readMessage tag = $Z
-		ifFalse: [ ^ P3Error readyForQueryExpected signal ].
+		self readMessage tag = $Z
+			ifFalse: [ ^ P3Error readyForQueryExpected signal ].
 
-	statement := self 
-		createPreparedStatementNamed: queryName 
-		withParameters: parameterDescriptions 
-		andFields: rowDescriptions.
+		statement := self 
+			createPreparedStatementNamed: queryName 
+			withParameters: parameterDescriptions 
+			andFields: rowDescriptions.
+			
+		statement source: query.
 	
-	self logPreparedStatement: statement query: query.
-	 	
+		self logPreparedStatement: statement query: query ].
+
 	^ statement
 ]
 
@@ -690,9 +728,14 @@ P3Client >> preparedStatementNamed: name [
 P3Client >> printOn: stream [
 	super printOn: stream.
 	stream nextPut: $(.
-	stream print: self url.
-	self session ifNotNil: [ stream space; print: session ].
+	self printStateOn:  stream.
 	stream nextPut: $)
+]
+
+{ #category : #printing }
+P3Client >> printStateOn: stream [
+	stream print: self compactUrl.
+	self session ifNotNil: [ stream space; print: session ]
 ]
 
 { #category : #private }
@@ -764,11 +807,12 @@ P3Client >> query: query [
 	Descriptions is a collection of row field description objects, if any.
 	Data is a collection of rows with fully converted field values as objects, if any."
 
-	^ self withConnection: [
-		self 
-			ensureConnected;
-			writeQueryMessage: query;
-			runQueryResult ]
+	^ self critical: [
+		self withConnection: [
+			self ensureConnected.
+			properties at: #sql_source put: query.
+			self writeQueryMessage: query.
+			self runQueryResult ] ]
 ]
 
 { #category : #accessing }
@@ -876,10 +920,13 @@ P3Client >> runExtendedQueryResult: descriptions [
 			out nextPut: (self processDataRowUsing: descriptions).
 			self readMessage ] ].
 	
-	result := P3Result descriptions: descriptions
-			rows: rows 
-			message: (self converter asciiCStringFrom: message readStream).
-	
+	result := P3Result 
+		descriptions: descriptions
+		data: rows 
+		results: (self converter asciiCStringFrom: message readStream).
+
+	result source: (properties at: #sql_source ifAbsent: nil).
+
 	self logResult: result.
 	 
 	^ result
@@ -890,13 +937,15 @@ P3Client >> runExtendedQueryResults: fieldDescriptions [
 	
 	| results queryStarted |
 
-	queryStarted := Time millisecondClockValue.
-	self readMessage.
-	results := Array streamContents: [ :out |
-		[
-			properties at: #query_started ifAbsentPut: queryStarted. "each result will use the same start"
-			out nextPut: (self runExtendedQueryResult: fieldDescriptions).
-			self readMessage tag = $Z ] whileFalse ].
+	self critical: [
+		queryStarted := Time millisecondClockValue.
+		self readMessage.
+		results := Array streamContents: [ :out |
+			[
+				"each result will use the same start"
+				properties at: #query_started ifAbsentPut: queryStarted.
+				out nextPut: (self runExtendedQueryResult: fieldDescriptions).
+				self readMessage tag = $Z ] whileFalse ] ].
 	
 	^ results
 ]
@@ -919,6 +968,7 @@ P3Client >> runQueryResult [
 		self readMessage tag = $S
 			ifTrue: [ self processParameterStatus: message readStream; readMessage ].
 		message tag = $Z ] whileFalse.
+	result source: (properties at: #sql_source ifAbsent: nil).
 	self logResult: result.
 	^ result
 ]
@@ -1023,6 +1073,11 @@ P3Client >> setSSL [
 	settings at: #ssl put: true
 ]
 
+{ #category : #private }
+P3Client >> setSource: sql [
+	properties at: #sql_source put: sql
+]
+
 { #category : #'error handling' }
 P3Client >> signal: exceptionClass using: info [
 	| exception |
@@ -1046,7 +1101,25 @@ P3Client >> startupMessage [
 			self database ifNotNil: [ 
 				out nextPutAll: (self asCString: 'database').
 				out nextPutAll: (self asCString: self database) ].
+			self startupOptions ifNotNil: [
+				out nextPutAll: (self asCString: 'options').
+				out nextPutAll: (self asCString: self startupOptions) ].
 			out nextPut: 0 ]
+]
+
+{ #category : #accessing }
+P3Client >> startupOptions [
+	^ settings at: #options ifAbsent: [ nil ]
+]
+
+{ #category : #accessing }
+P3Client >> startupOptions: optionsString [
+	settings at: #options put: optionsString
+]
+
+{ #category : #printing }
+P3Client >> statePrintString [
+	^ String streamContents: [ :out | self printStateOn: out ]
 ]
 
 { #category : #accessing }
@@ -1099,34 +1172,49 @@ P3Client >> url [
 	"Return my connection URL"
 	
 	| url |
-	(url := ZnUrl new)
-		scheme: #psql;
-		host: self host;
-		port: self port;
-		username: self user;
-		password: self password.
+	(url := ZnUrl new) scheme: #postgresql.
+	self isUsingUnixSocket
+		ifTrue: [ 
+			url queryAt: #host put: self host.
+			self user ifNotNil: [ url queryAt: #user put: self user ].
+			self password ifNotNil: [ url queryAt: #password put: self password ] ]
+		ifFalse: [
+			url 
+				host: self host;
+				port: self port;
+				username: self user;
+				password: self password ].
 	self database ifNotNil: [ url addPathSegment: self database ].
 	self isSSL ifTrue: [ url queryAt: #sslmode put: #require ].
+	self startupOptions ifNotNil: [ :options | url queryAt: #options put: options ].
 	^ url
 ]
 
 { #category : #'initialize-release' }
 P3Client >> url: stringOrUrl [
 	"Set my connection settings from stringOrUrl according to the format
-	psql://username:password@localhost:5432/databasename?sslmode=require
-	with the minimum being psql://user@localhost"
+	postgresql://username:password@localhost:5432/databasename?sslmode=require
+	with the minimum being psql://user@localhost , for a unix socket the format is
+	postgresql:///databasename?host=/path/to/psql.socket&user=username&password=password"
 	
 	| url |
 	url := stringOrUrl asUrl.
 	self assert: (#(psql postgres postgresql) includes: url scheme).
-	self
-		host: url host;
-		port: (url portIfAbsent: [ 5432 ]);
-		user: url username;
-		password: url password;
-		database: url firstPathSegment.
+	url host
+		ifNil: [
+			url queryAt: #host ifPresent: [ :host | self host: host ].
+			url queryAt: #user ifPresent: [ :user | self user: user ].
+			url queryAt: #password ifPresent: [ :password | self password: password ] ]
+		ifNotNil: [
+			self
+				host: url host;
+				port: (url portIfAbsent: [ 5432 ]);
+				user: url username;
+				password: url password ].
+	self database: url firstPathSegment.
 	(url queryAt: #sslmode ifAbsent: [ #disable ]) = #require
-		ifTrue: [ self setSSL ]
+		ifTrue: [ self setSSL ].
+	url queryAt: #options ifPresent: [ :options | self startupOptions: options ]
 ]
 
 { #category : #accessing }
