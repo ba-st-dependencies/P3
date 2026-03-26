@@ -27,7 +27,7 @@ jobs:
       - name: Load Image and Run Tests
         uses: ba-st-actions/pharo-ci@v10
         with:
-          spec: .smalltalkci/.unit-tests.ston
+          spec: .smalltalk.ston
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         timeout-minutes: 15
@@ -60,7 +60,7 @@ jobs:
       - name: Load Image and Run Tests
         uses: ba-st-actions/pharo-ci@v11
         with:
-          spec: .smalltalkci/.unit-tests.ston
+          spec: .smalltalk.ston
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         timeout-minutes: 15
@@ -93,7 +93,7 @@ jobs:
       - name: Load Image and Run Tests
         uses: ba-st-actions/pharo-ci@v12
         with:
-          spec: .smalltalkci/.unit-tests.ston
+          spec: .smalltalk.ston
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         timeout-minutes: 15
@@ -126,7 +126,7 @@ jobs:
       - name: Load Image and Run Tests
         uses: ba-st-actions/pharo-ci@v13
         with:
-          spec: .smalltalkci/.unit-tests.ston
+          spec: .smalltalk.ston
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         timeout-minutes: 15
